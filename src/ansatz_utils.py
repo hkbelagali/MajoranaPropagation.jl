@@ -65,7 +65,7 @@ def to_json(hf: PrepareHartreeFockJW, ucj: UCJOpSpinBalancedJW,
     return {
         "norb":      norb,
         "time":      float(time),
-        "nelectron": nelectron,
+        "nelectron": int(nelectron),
         "layers":    layers,
         "final":     final_serialized,
     }
@@ -123,44 +123,22 @@ if __name__ == "__main__":
     n_alpha = (n_electrons + mol.spin) // 2
     n_beta = (n_electrons - mol.spin) // 2
     nelec = (n_alpha, n_beta)
-    cas = pyscf.mcscf.CASCI(scf, norb, nelec)
-    mo = cas.sort_mo(active_space, base=0)
-    hcore, nuclear_repulsion_energy = cas.get_h1cas(mo)
-    eri = pyscf.ao2mo.restore(1, cas.get_h2cas(mo), norb)
-
-    # Compute exact energy using FCI
-    reference_energy = cas.run().e_tot
 
     print(f"norb = {norb}")
     print(f"nelec = {nelec}")
 
-    # Get CCSD t2 amplitudes for initializing the ansatz
-    ccsd = pyscf.cc.CCSD(
-        scf, frozen=[i for i in range(mol.nao_nr()) if i not in active_space]
-    ).run()
-    t1 = ccsd.t1
-    t2 = ccsd.t2
-
-    # Set ansatz properties
-    n_reps = 2
-    pairs_aa = [(p, p + 1) for p in range(norb - 1)]
-    pairs_ab = [(p, p) for p in range(norb)]  # None  # Let generate_lucj_pass_manager determine the alpha-beta interactions
-
-    # Create the LUCJ ansatz operator
-    ucj_op = ffsim.UCJOpSpinBalanced.from_t_amplitudes(
-        t2=t2,
-        t1=t1,
-        n_reps=n_reps,
-        interaction_pairs=(pairs_aa, pairs_ab),
-        # Setting optimize=True enables the "compressed" factorization
-        optimize=True,
-        # Limit the number of optimization iterations to prevent the code cell from running
-        # too long. Removing this line may improve results.
-        options=dict(maxiter=1000),
-    )
+    norb = mol.nao_nr()
+    pairs_aa = [(p, p + 1) for p in range(norb - 1)]   # same-spin line
+    pairs_ab = [(p, p) for p in range(norb)]           # opposite-spin on-site
 
     hf = ffsim.qiskit.PrepareHartreeFockJW(norb, nelec)
-    lucj = ffsim.qiskit.UCJOpSpinBalancedJW(ucj_op)
+    ucj = ffsim.UCJOpSpinBalanced.from_t_amplitudes(
+        t2=cc_.t2, t1=cc_.t1,
+        n_reps=2,
+        interaction_pairs=(pairs_aa, pairs_ab),
+    )
+
+    lucj = ffsim.qiskit.UCJOpSpinBalancedJW(ucj)
 
     payload = to_json(hf, lucj) 
     with open("test_payload.json", "w") as f:
