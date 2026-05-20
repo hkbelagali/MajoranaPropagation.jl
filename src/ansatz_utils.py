@@ -112,6 +112,11 @@ if __name__ == "__main__":
     N = mol.nao_nr() * 2
 
 
+    # Define active space
+    n_frozen = 0
+    active_space = range(n_frozen, mol.nao_nr())
+
+
     # Get molecular integrals
     scf = pyscf.scf.RHF(mol).run()
     norb = len(active_space)
