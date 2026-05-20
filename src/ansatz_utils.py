@@ -111,10 +111,6 @@ if __name__ == "__main__":
     cc_ = cc.CCSD(mf).run()
     N = mol.nao_nr() * 2
 
-    # Define active space
-    n_frozen = 0
-    active_space = range(n_frozen, mol.nao_nr())
-
 
     # Get molecular integrals
     scf = pyscf.scf.RHF(mol).run()
@@ -123,23 +119,65 @@ if __name__ == "__main__":
     n_alpha = (n_electrons + mol.spin) // 2
     n_beta = (n_electrons - mol.spin) // 2
     nelec = (n_alpha, n_beta)
+    cas = pyscf.mcscf.CASCI(scf, norb, nelec)
+    mo = cas.sort_mo(active_space, base=0)
+    hcore, nuclear_repulsion_energy = cas.get_h1cas(mo)
+    eri = pyscf.ao2mo.restore(1, cas.get_h2cas(mo), norb)
+
+    # Compute exact energy using FCI
+    reference_energy = cas.run().e_tot
 
     print(f"norb = {norb}")
     print(f"nelec = {nelec}")
 
-    norb = mol.nao_nr()
-    pairs_aa = [(p, p + 1) for p in range(norb - 1)]   # same-spin line
-    pairs_ab = [(p, p) for p in range(norb)]           # opposite-spin on-site
+    # Get CCSD t2 amplitudes for initializing the ansatz
+    ccsd = pyscf.cc.CCSD(
+        scf, frozen=[i for i in range(mol.nao_nr()) if i not in active_space]
+    ).run()
+    t1 = ccsd.t1
+    t2 = ccsd.t2
 
-    hf = ffsim.qiskit.PrepareHartreeFockJW(norb, nelec)
-    ucj = ffsim.UCJOpSpinBalanced.from_t_amplitudes(
-        t2=cc_.t2, t1=cc_.t1,
-        n_reps=2,
-        interaction_pairs=(pairs_aa, pairs_ab),
+    # Set ansatz properties
+    n_reps = 1
+    pairs_aa = [(p, p + 1) for p in range(norb - 1)]
+    pairs_ab = [(p, p) for p in range(norb)]  # None  # Let generate_lucj_pass_manager determine the alpha-beta interactions
+
+    # Initialize backend
+    coupling_map = CouplingMap.from_heavy_hex(3)
+    backend = GenericBackendV2(
+        coupling_map.size(),
+        coupling_map=coupling_map,
+        basis_gates=["cp", "xx_plus_yy", "p", "x", "swap"],
     )
 
-    lucj = ffsim.qiskit.UCJOpSpinBalancedJW(ucj)
+    # Create pass manager
+    pass_manager, pairs_ab = ffsim.qiskit.generate_lucj_pass_manager(
+        backend=backend,
+        norb=norb,
+        connectivity="heavy-hex",
+        interaction_pairs=(pairs_aa, pairs_ab),
+        optimization_level=3,
+    )
 
-    payload = to_json(hf, lucj) 
+    # Create the LUCJ ansatz operator
+    ucj_op = ffsim.UCJOpSpinBalanced.from_t_amplitudes(
+        t2=t2,
+        t1=t1,
+        n_reps=n_reps,
+        interaction_pairs=(pairs_aa, pairs_ab),
+        # Setting optimize=True enables the "compressed" factorization
+        optimize=True,
+        # Limit the number of optimization iterations to prevent the code cell from running
+        # too long. Removing this line may improve results.
+        options=dict(maxiter=1000),
+    )
+
+    # create an empty quantum circuit
+    qubits = QuantumRegister(2 * norb, name="q")
+    circuit = QuantumCircuit(qubits)
+
+    hf = ffsim.qiskit.PrepareHartreeFockJW(norb, nelec)
+    lucj = ffsim.qiskit.UCJOpSpinBalancedJW(ucj_op)
+
     with open("test_payload.json", "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(to_json(hf, lucj), f, indent=2)
